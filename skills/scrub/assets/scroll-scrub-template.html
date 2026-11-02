@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<!--
+  Scroll-scrubbed video hero — reference template.
+  Copy the .bg-layer markup + CSS + <script> block into a new page and adapt:
+    - video source, dimensions, duration
+    - runway height (.hero-scrub-space) if the clip needs more/less scroll travel
+    - ramp start/end values for whatever overlays cross-fade in/out
+  See ../SKILL.md for the reasoning behind each piece.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scroll-scrub template</title>
+<style>
+  html{scroll-behavior:smooth;}
+  body{margin:0;}
+
+  /* Fixed backdrop behind the whole page, not just the hero */
+  .bg-layer{
+    position:fixed; inset:0; width:100vw; height:100dvh;
+    z-index:0; overflow:hidden; background:#000;
+  }
+  .bg-layer video{ display:none; } /* decode-only, never shown directly */
+  .bg-layer canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+
+  main, header.hero, footer{ position:relative; z-index:1; }
+
+  /* Tall runway: scrolling through this range plays the whole clip.
+     header.hero stays pinned while it happens; past it, the video is
+     frozen on its last frame for the rest of the page. */
+  .hero-scrub-space{ position:relative; height:200vh; z-index:1; }
+  header.hero{ position:sticky; top:0; min-height:100vh; }
+
+  /* Overlay(s) that cross-fade based on scroll progress through the runway */
+  .overlay-a, .overlay-b{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:#fff; font:500 2rem system-ui, sans-serif; text-align:center;
+    transition:opacity .25s linear; pointer-events:none;
+  }
+  .overlay-b{ opacity:0; }
+
+  /* Static fallback shown instead of the scrub when the user prefers reduced motion */
+  .static-fallback{ display:none; }
+</style>
+</head>
+<body>
+
+<div class="bg-layer">
+  <video id="heroBg" muted playsinline preload="auto">
+    <source src="your-clip.mp4" type="video/mp4">
+  </video>
+  <canvas id="heroBgCanvas"></canvas>
+</div>
+
+<div class="hero-scrub-space" id="heroScrubSpace">
+  <header class="hero">
+    <div class="overlay-a" id="overlayA">Hero headline / CTA</div>
+    <div class="overlay-b" id="overlayB">Brand mark / payoff</div>
+  </header>
+</div>
+
+<main>
+  <!-- rest of the page; the frozen last frame of the video shows through
+       behind it since .bg-layer is position:fixed and z-index:0 -->
+</main>
+
+<script>
+(function () {
+  const heroBg = document.getElementById('heroBg');
+  const heroCanvas = document.getElementById('heroBgCanvas');
+  const heroScrubSpace = document.getElementById('heroScrubSpace');
+  const overlayA = document.getElementById('overlayA');
+  const overlayB = document.getElementById('overlayB');
+  if (!heroBg || !heroCanvas || !heroScrubSpace) return;
+
+  // Respect the user's OS/browser motion preference by default. Only force
+  // the scrub off (DEMO_MODE = true) when explicitly building a one-off
+  // pitch/demo page that must present identically for every viewer.
+  const DEMO_MODE = false;
+  const reduceMotion = !DEMO_MODE &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const ctx = heroCanvas.getContext('2d');
+
+  const rampIn = (p, start, end) => p <= start ? 0 : p >= end ? 1 : (p - start) / (end - start);
+  const rampOut = (p, start, end) => 1 - rampIn(p, start, end);
+
+  const resizeCanvas = () => {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = heroCanvas.clientWidth, h = heroCanvas.clientHeight;
+    if (!w || !h) return;
+    heroCanvas.width = Math.round(w * dpr);
+    heroCanvas.height = Math.round(h * dpr);
+  };
+
+  // object-fit: cover, drawn manually since the canvas is what's visible
+  const drawFrame = () => {
+    const vw = heroBg.videoWidth, vh = heroBg.videoHeight;
+    const cw = heroCanvas.width, ch = heroCanvas.height;
+    if (!vw || !vh || !cw || !ch) return;
+    const scale = Math.max(cw / vw, ch / vh);
+    const dw = vw * scale, dh = vh * scale;
+    const dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(heroBg, dx, dy, dw, dh);
+  };
+
+  const scrollProgress = () => {
+    const rect = heroScrubSpace.getBoundingClientRect();
+    const scrollable = rect.height - window.innerHeight;
+    return scrollable > 0 ? Math.min(Math.max(-rect.top / scrollable, 0), 1) : 0;
+  };
+
+  // Adjust these ramp windows to taste; keep A's rampOut ending near or
+  // before B's rampIn starts so there's no dead gap with nothing visible.
+  const updateOverlays = (progress) => {
+    if (overlayA) overlayA.style.opacity = rampOut(progress, 0.22, 0.46);
+    if (overlayB) overlayB.style.opacity = rampIn(progress, 0.48, 0.7);
+  };
+
+  if (reduceMotion) {
+    // Reduced motion: draw one static frame, no scroll-driven scrubbing.
+    heroBg.addEventListener('loadeddata', () => { resizeCanvas(); heroBg.currentTime = 0.1; });
+    heroBg.addEventListener('seeked', drawFrame);
+    window.addEventListener('resize', () => { resizeCanvas(); drawFrame(); });
+    updateOverlays(0);
+    return;
+  }
+
+  let ready = false;
+  let ticking = false;
+  let durationFixed = false;
+
+  const scrub = () => {
+    if (!ready || !isFinite(heroBg.duration) || heroBg.duration <= 0) { ticking = false; return; }
+    const progress = scrollProgress();
+    updateOverlays(progress);
+    const target = Math.min(progress * heroBg.duration, heroBg.duration - 0.05);
+    if (Math.abs(heroBg.currentTime - target) > 0.03) {
+      try { heroBg.currentTime = target; } catch (e) {}
+    } else {
+      drawFrame();
+    }
+    ticking = false;
+  };
+
+  const finishInit = () => {
+    ready = true;
+    heroBg.pause();
+    resizeCanvas();
+    updateOverlays(scrollProgress());
+    scrub();
+    drawFrame();
+  };
+
+  // Some encodes report duration = Infinity until forced to seek near the
+  // end once. Do that fix-up seek before relying on heroBg.duration.
+  const fixDurationIfNeeded = () => {
+    if (durationFixed) return;
+    if (!isFinite(heroBg.duration)) {
+      durationFixed = true;
+      const onSeeked = () => {
+        heroBg.removeEventListener('seeked', onSeeked);
+        heroBg.currentTime = 0;
+        finishInit();
+      };
+      heroBg.addEventListener('seeked', onSeeked);
+      heroBg.currentTime = 1e7;
+    } else {
+      durationFixed = true;
+      finishInit();
+    }
+  };
+
+  heroBg.addEventListener('loadedmetadata', fixDurationIfNeeded);
+  heroBg.addEventListener('durationchange', fixDurationIfNeeded);
+  heroBg.addEventListener('seeked', drawFrame);
+  if (heroBg.readyState >= 1) fixDurationIfNeeded();
+  heroBg.load();
+
+  // Warm-up so mobile browsers (esp. iOS Safari) actually decode frames.
+  // Best-effort only — play() can be silently blocked, that's fine.
+  const p = heroBg.play();
+  if (p && p.catch) p.catch(() => {});
+  setTimeout(() => heroBg.pause(), 50);
+
+  window.addEventListener('scroll', () => {
+    if (!ticking) { requestAnimationFrame(scrub); ticking = true; }
+  }, { passive: true });
+  window.addEventListener('resize', () => { resizeCanvas(); drawFrame(); });
+})();
+</script>
+
+</body>
+</html>
